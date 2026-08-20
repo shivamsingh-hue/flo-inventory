@@ -1131,6 +1131,18 @@ window.addEventListener('load',()=>{
 </body>
 </html>"""
 
+import threading
+def _keep_alive():
+    import time
+    time.sleep(300)
+    while True:
+        try:
+            urllib.request.urlopen("https://flo-inventory.onrender.com/", timeout=10)
+        except: pass
+        time.sleep(840)
+
+threading.Thread(target=_keep_alive, daemon=True).start()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
