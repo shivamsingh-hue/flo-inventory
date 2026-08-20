@@ -952,7 +952,7 @@ function qtyCard(i,cid,showProduct){
     prod=`<div class="product-details"><div class="pd-grid">
       <div class="pd-product"><strong>Product:</strong> ${cleanProd||'N/A'}</div>
       <div class="pd-meta">
-        <div><strong>EAN:</strong> <span class="ean-highlight">${i.ean||'N/A'}</span></div>
+        <div><strong>EAN:</strong> <span class="ean-highlight">${(i.eans&&i.eans.length>1)?i.eans.join(', '):i.ean||'N/A'}</span></div>
         <div><strong>FSN:</strong> ${i.fsn||'N/A'}</div>
         <div><strong>WID:</strong> ${i.wid||'N/A'} — <span class="qty-highlight">Qty: ${i.itemQty||0}</span></div>
       </div></div></div>`;
