@@ -11,6 +11,36 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dic-flo-2024-render")
 DB = os.path.join(os.path.dirname(__file__), "flo_inventory.db")
 
+# GitHub raw URL to always fetch latest DB
+GITHUB_RAW_DB = "https://raw.githubusercontent.com/shivamsingh-hue/flo-inventory/main/flo_inventory.db"
+GITHUB_TOKEN  = "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"
+
+_db_cache_ts = 0
+_db_cache_ttl = 280  # seconds — refresh DB every ~5 mins
+
+def refresh_db_from_github():
+    """Download latest flo_inventory.db from GitHub if cache is stale."""
+    global _db_cache_ts
+    import time, urllib.request
+    now = time.time()
+    if now - _db_cache_ts < _db_cache_ttl and os.path.exists(DB):
+        return  # still fresh
+    try:
+        req = urllib.request.Request(
+            GITHUB_RAW_DB,
+            headers={"Authorization": f"token {GITHUB_TOKEN}",
+                     "Cache-Control": "no-cache",
+                     "User-Agent": "flo-app"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        with open(DB, "wb") as f:
+            f.write(data)
+        _db_cache_ts = time.time()
+        print(f"[DB] Refreshed from GitHub ({len(data)//1024} KB)")
+    except Exception as e:
+        print(f"[DB] GitHub refresh failed: {e}")
+
 # ── Casper IDs (add your team's IDs here, or load from DB if you add a table) ──
 CASPER_IDS = {
     # "ID": {"name": "Full Name", "dept": "Department"}
@@ -64,6 +94,7 @@ def get_pull_ts():
     except: return None
 
 def load_inventory():
+    refresh_db_from_github()
     if not os.path.exists(DB): return [], None
     try:
         conn = get_db()
