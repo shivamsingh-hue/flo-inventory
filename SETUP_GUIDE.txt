@@ -1,0 +1,141 @@
+═══════════════════════════════════════════════════════════
+  FLO INVENTORY — COMPLETE SETUP GUIDE
+  (Read this top to bottom, do each step once)
+═══════════════════════════════════════════════════════════
+
+YOU NEED:
+  ✓ GitHub account (you already have it)
+  ✓ Railway account (free, sign in with GitHub — no new password)
+  ✓ This folder of files on your Desktop
+
+NO credit card. NO server. NO extra installs beyond what you already have.
+
+───────────────────────────────────────────────────────────
+PART 1 — PUT THIS FOLDER ON GITHUB (do this once)
+───────────────────────────────────────────────────────────
+
+Step 1: Move this entire folder to your Desktop
+         The folder should be named:  flo-inventory
+         Path will be: C:\Users\shivamsingh.n\Desktop\flo-inventory
+
+Step 2: Open Command Prompt
+         Press  Win + R  → type  cmd  → press Enter
+
+Step 3: Type these commands one by one (press Enter after each):
+
+         cd C:\Users\shivamsingh.n\Desktop\flo-inventory
+
+         git init
+
+         git add .
+
+         git commit -m "first commit"
+
+Step 4: Go to https://github.com in your browser
+         Click the green "New" button (top left)
+         Repository name: flo-inventory
+         Keep it PUBLIC
+         Do NOT tick any checkboxes
+         Click "Create repository"
+
+Step 5: GitHub will show you a page with commands.
+         Copy the two lines that look like this and run them in cmd:
+
+         git remote add origin https://github.com/YOUR_USERNAME/flo-inventory.git
+         git push -u origin main
+
+         (use YOUR actual GitHub username, not YOUR_USERNAME)
+
+         It will ask for your GitHub username and password.
+         Note: for password use a "Personal Access Token" not your real password.
+         To create one: GitHub → Settings → Developer Settings →
+                        Personal Access Tokens → Tokens (classic) → Generate new token
+                        Tick "repo" → Generate → Copy the token → paste as password
+
+Step 6: Refresh your GitHub page — you should see all files there. ✓
+
+───────────────────────────────────────────────────────────
+PART 2 — DEPLOY TO RAILWAY (do this once)
+───────────────────────────────────────────────────────────
+
+Step 1: Go to https://railway.app
+         Click "Login" → choose "Login with GitHub"
+         Approve the permissions — this uses your SAME GitHub account
+
+Step 2: Click "New Project"
+         Choose "Deploy from GitHub repo"
+         Select "flo-inventory" from the list
+
+Step 3: Railway will auto-detect everything and start deploying.
+         Wait ~2 minutes for it to finish (green checkmark)
+
+Step 4: Click on your project → "Settings" → "Domains"
+         Click "Generate Domain"
+         You will get a link like:  https://flo-inventory-xxxx.up.railway.app
+         
+         THAT IS YOUR PUBLIC LINK. Share it with anyone.
+
+───────────────────────────────────────────────────────────
+PART 3 — RUN THE SCRAPER ON YOUR MACHINE
+───────────────────────────────────────────────────────────
+
+Step 1: Make sure you have installed the selenium library.
+         Open Command Prompt and run:
+         
+         pip install selenium
+
+Step 2: Make sure chromedriver.exe is on your Desktop.
+         (same one you used for v21 — it's already there)
+
+Step 3: Run the scraper:
+
+         cd C:\Users\shivamsingh.n\Desktop\flo-inventory
+         python flo_scraper.py
+
+Step 4: A Chrome window opens → Log into FLO → come back to cmd → press ENTER
+
+Step 5: Every 5 minutes you will see:
+         [15:30:00] ✓ Saved 1243 rows to SQLite
+                    ✓ Pushed to GitHub
+
+         Railway auto-detects the GitHub push and updates your public link.
+
+───────────────────────────────────────────────────────────
+PART 4 — HOW TO CHECK IT'S WORKING
+───────────────────────────────────────────────────────────
+
+1. Open your Railway link in any browser (phone, laptop, anyone's computer)
+2. You should see the FLO inventory table with a search box
+3. It says "Last updated: [time]" at the top
+4. The page auto-refreshes every 5 minutes
+
+───────────────────────────────────────────────────────────
+TROUBLESHOOTING
+───────────────────────────────────────────────────────────
+
+Problem: "chromedriver not found"
+Fix:     Make sure chromedriver.exe is at:
+         C:\Users\shivamsingh.n\Desktop\chromedriver.exe
+
+Problem: "git is not recognized"
+Fix:     Download Git from https://git-scm.com/download/win
+         Install it, restart Command Prompt, try again
+
+Problem: Railway shows "No data yet"
+Fix:     The scraper hasn't run yet. Run flo_scraper.py first
+
+Problem: Git push says "authentication failed"
+Fix:     Use a Personal Access Token as your password (see Part 1, Step 5)
+
+───────────────────────────────────────────────────────────
+FILES IN THIS FOLDER
+───────────────────────────────────────────────────────────
+
+flo_scraper.py    ← runs on YOUR machine, scrapes FLO every 5 mins
+app.py            ← runs on Railway (cloud), shows the public table
+requirements.txt  ← tells Railway which libraries to install
+Procfile          ← tells Railway how to start the app
+.gitignore        ← tells git which files to skip
+SETUP_GUIDE.txt   ← this file
+
+═══════════════════════════════════════════════════════════
