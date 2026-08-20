@@ -1,13 +1,9 @@
 """
-app.py
-------
-Runs on Railway (cloud) — NOT on your machine.
-Reads flo_inventory.db and shows it as a searchable table at your public link.
-Railway starts this automatically. You don't need to touch this file.
+app.py — Runs on Render. Reads flo_inventory.db and serves a searchable table.
 """
 
-import sqlite3, os
-from flask import Flask, render_template_string, request
+import sqlite3, os, csv, io
+from flask import Flask, render_template_string, request, Response
 
 app = Flask(__name__)
 DB  = os.path.join(os.path.dirname(__file__), "flo_inventory.db")
@@ -30,6 +26,8 @@ HTML = """
   input[type=text]{border:1px solid #ddd;border-radius:6px;padding:7px 12px;font-size:14px;width:280px;outline:none}
   input[type=text]:focus{border-color:#1a1a2e}
   .count{font-size:13px;color:#666}
+  .dl-btn{margin-left:auto;background:#1a1a2e;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  .dl-btn:hover{background:#e94560}
   .table-wrap{overflow-x:auto;padding:16px 24px}
   table{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
   th{background:#1a1a2e;color:#fff;padding:10px 14px;text-align:left;font-weight:500;white-space:nowrap;font-size:12px;letter-spacing:.4px;text-transform:uppercase}
@@ -54,6 +52,7 @@ HTML = """
 <div class="controls">
   <input type="text" id="search" placeholder="Search anything..." oninput="filterTable()" autofocus>
   <span class="count" id="count-label">{{ rows|length }} rows</span>
+  <a class="dl-btn" href="/download" download>⬇ Download CSV</a>
 </div>
 
 <div class="table-wrap">
@@ -78,8 +77,7 @@ HTML = """
   </table>
   {% else %}
   <div class="empty">
-    No data yet — the scraper hasn't pushed anything yet.<br>
-    Run <code>flo_scraper.py</code> on your machine first.
+    No data yet — run <code>flo_5min_v22_sqlite.py</code> on your machine first.
   </div>
   {% endif %}
 </div>
@@ -98,7 +96,6 @@ function filterTable(){
   });
   document.getElementById('count-label').textContent=visible+' rows';
 }
-// Auto-refresh page every 5 minutes
 setTimeout(function(){ location.reload(); }, 300000);
 </script>
 </body>
@@ -106,48 +103,55 @@ setTimeout(function(){ location.reload(); }, 300000);
 """
 
 
-def get_data(search=""):
+def get_data():
     if not os.path.exists(DB):
         return [], [], None
     try:
         conn = sqlite3.connect(DB, timeout=10)
         conn.row_factory = sqlite3.Row
-
-        # get last pull timestamp
         try:
             ts_row = conn.execute("SELECT MAX(_pull_ts) FROM inventory").fetchone()
             pull_ts = ts_row[0] if ts_row else None
         except:
             pull_ts = None
-
-        # get columns (skip internal _pull_ts — show it as first col labelled "Last Updated")
         cur = conn.execute("SELECT * FROM inventory LIMIT 1")
         if not cur.description:
             return [], [], pull_ts
-        all_cols = [d[0] for d in cur.description]
-        # put _pull_ts first with friendly name
+        all_cols    = [d[0] for d in cur.description]
         display_cols = ["Last Updated"] + [c for c in all_cols if c != "_pull_ts"]
         db_cols      = ["_pull_ts"]     + [c for c in all_cols if c != "_pull_ts"]
-
         query = f"SELECT {','.join(chr(34)+c+chr(34) for c in db_cols)} FROM inventory"
         rows  = conn.execute(query).fetchall()
-
-        if search:
-            search_lower = search.lower()
-            rows = [r for r in rows if any(search_lower in str(v).lower() for v in r)]
-
         conn.close()
         return display_cols, [list(r) for r in rows], pull_ts
-    except Exception as e:
+    except:
         return [], [], None
 
 
 @app.route("/")
 def index():
-    search  = request.args.get("q", "")
-    columns, rows, pull_ts = get_data(search)
-    return render_template_string(HTML, columns=columns, rows=rows,
-                                  pull_ts=pull_ts, search=search)
+    columns, rows, pull_ts = get_data()
+    q = request.args.get("q", "")
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if any(ql in str(v).lower() for v in r)]
+    return render_template_string(HTML, columns=columns, rows=rows, pull_ts=pull_ts)
+
+
+@app.route("/download")
+def download():
+    columns, rows, _ = get_data()
+    out = io.StringIO()
+    w = csv.writer(out)
+    if columns:
+        w.writerow(columns)
+    w.writerows(rows)
+    out.seek(0)
+    return Response(
+        out.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=flo_inventory.csv"}
+    )
 
 
 if __name__ == "__main__":
