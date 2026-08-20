@@ -13,7 +13,7 @@ DB = os.path.join(os.path.dirname(__file__), "flo_inventory.db")
 
 # GitHub raw URL to always fetch latest DB
 GITHUB_RAW_DB = "https://raw.githubusercontent.com/shivamsingh-hue/flo-inventory/main/flo_inventory.db"
-GITHUB_TOKEN  = "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"
+GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
 
 _db_cache_ts = 0
 _db_cache_ttl = 280  # seconds — refresh DB every ~5 mins
