@@ -23,15 +23,16 @@ CACHE_TTL   = 280  # seconds
 # ── GitHub fetch ──────────────────────────────────────────
 def refresh_file(filename, local_path):
     now = time.time()
-    # DB always re-fetched — other files cached for CACHE_TTL
-    if filename != "flo_inventory.db":
-        if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
-            return
+    if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
+        return
     try:
+        bust = int(time.time())
         req = urllib.request.Request(
-            GITHUB_RAW + filename,
+            GITHUB_RAW + filename + f"?bust={bust}",
             headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Cache-Control": "no-cache", "User-Agent": "flo-app"}
+                     "Cache-Control": "no-cache, no-store",
+                     "Pragma": "no-cache",
+                     "User-Agent": "flo-app"}
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read()
@@ -1110,6 +1111,8 @@ function renderAction(targetId){
 
 function renderBins(targetId){
   const wrap=document.getElementById(targetId);if(!wrap)return;
+
+  // ── Floor summary ──
   let rows='',gF=0,gP=0,gS=0,gFu=0;
   METRICS.forEach(r=>{
     const tot=(r.free||0)+(r.partial||0)+(r.semi||0)+(r.full||0);
@@ -1117,19 +1120,81 @@ function renderBins(targetId){
     rows+=`<tr><td class="row-title">${r.floor}</td><td><span class="badge-counter bg-free">${r.free||0}</span></td><td><span class="badge-counter bg-partial">${r.partial||0}</span></td><td><span class="badge-counter bg-semi">${r.semi||0}</span></td><td><span class="badge-counter bg-full">${r.full||0}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
   });
   rows+=`<tr style="border-top:2px solid #443a3a"><td class="row-title" style="background:#443a3a;color:#fff">TOTAL</td><td><span class="badge-counter bg-free">${gF}</span></td><td><span class="badge-counter bg-partial">${gP}</span></td><td><span class="badge-counter bg-semi">${gS}</span></td><td><span class="badge-counter bg-full">${gFu}</span></td><td><span class="badge-counter bg-rowtotal">${gF+gP+gS+gFu}</span></td></tr>`;
-  wrap.innerHTML=`<div class="section-box"><span class="section-title">⚡ Capacity Metrics — By Floor</span>
-    <table class="summary-table"><thead><tr>
-      <th style="background:#443a3a;text-align:left;padding-left:8px">Floor</th>
-      <th style="background:#27ae60">Free<br><span style="font-size:9px">0 Qty</span></th>
-      <th style="background:#e67e22">Partial<br><span style="font-size:9px">1-10</span></th>
-      <th style="background:#7e5233">Semi<br><span style="font-size:9px">11-30</span></th>
-      <th style="background:#c0392b">Full<br><span style="font-size:9px">31+</span></th>
-      <th style="background:#443a3a">Total</th>
-    </tr></thead><tbody>${rows}</tbody></table></div>`;
+
+  // ── Shelve Type summary ──
+  const typeMap={};
+  LOCS.forEach(loc=>{
+    const t=loc.type||'Unknown'; const r=loc.remark||'';
+    if(!typeMap[t])typeMap[t]={type:t,free:0,partial:0,semi:0,full:0};
+    if(r.includes('Free'))typeMap[t].free++;
+    else if(r.includes('Partial'))typeMap[t].partial++;
+    else if(r.includes('Semi'))typeMap[t].semi++;
+    else if(r.includes('Full'))typeMap[t].full++;
+  });
+  let trows='',tF=0,tP=0,tS=0,tFu=0;
+  Object.keys(typeMap).sort().forEach(t=>{
+    const c=typeMap[t]; const tot=c.free+c.partial+c.semi+c.full;
+    tF+=c.free;tP+=c.partial;tS+=c.semi;tFu+=c.full;
+    trows+=`<tr><td class="row-title">${t}</td><td><span class="badge-counter bg-free">${c.free}</span></td><td><span class="badge-counter bg-partial">${c.partial}</span></td><td><span class="badge-counter bg-semi">${c.semi}</span></td><td><span class="badge-counter bg-full">${c.full}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
+  });
+  trows+=`<tr style="border-top:2px solid #443a3a"><td class="row-title" style="background:#443a3a;color:#fff">TOTAL</td><td><span class="badge-counter bg-free">${tF}</span></td><td><span class="badge-counter bg-partial">${tP}</span></td><td><span class="badge-counter bg-semi">${tS}</span></td><td><span class="badge-counter bg-full">${tFu}</span></td><td><span class="badge-counter bg-rowtotal">${tF+tP+tS+tFu}</span></td></tr>`;
+
+  // ── Floor × Shelve Type breakdown ──
+  const flTypeMap={};
+  LOCS.forEach(loc=>{
+    const fl=loc.floor||'Unknown'; const t=loc.type||'Unknown'; const r=loc.remark||'';
+    if(!flTypeMap[fl])flTypeMap[fl]={};
+    if(!flTypeMap[fl][t])flTypeMap[fl][t]={free:0,partial:0,semi:0,full:0};
+    if(r.includes('Free'))flTypeMap[fl][t].free++;
+    else if(r.includes('Partial'))flTypeMap[fl][t].partial++;
+    else if(r.includes('Semi'))flTypeMap[fl][t].semi++;
+    else if(r.includes('Full'))flTypeMap[fl][t].full++;
+  });
+  let brows='';
+  Object.keys(flTypeMap).sort().forEach(fl=>{
+    let flF=0,flP=0,flS=0,flFu=0;
+    const types=flTypeMap[fl];
+    brows+=`<tr><td colspan="6" style="background:#443a3a;color:#FFD700;font-weight:800;padding:6px 8px;font-size:10px">🏢 ${fl}</td></tr>`;
+    Object.keys(types).sort().forEach(t=>{
+      const c=types[t]; const tot=c.free+c.partial+c.semi+c.full;
+      flF+=c.free;flP+=c.partial;flS+=c.semi;flFu+=c.full;
+      brows+=`<tr><td style="padding-left:14px;font-size:10px;color:#555;font-weight:600">${t}</td><td><span class="badge-counter bg-free">${c.free}</span></td><td><span class="badge-counter bg-partial">${c.partial}</span></td><td><span class="badge-counter bg-semi">${c.semi}</span></td><td><span class="badge-counter bg-full">${c.full}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
+    });
+    brows+=`<tr style="background:#f0e8e8"><td style="padding-left:8px;font-weight:800;font-size:10px;color:#7B1818">${fl} Subtotal</td><td><span class="badge-counter bg-free">${flF}</span></td><td><span class="badge-counter bg-partial">${flP}</span></td><td><span class="badge-counter bg-semi">${flS}</span></td><td><span class="badge-counter bg-full">${flFu}</span></td><td><span class="badge-counter bg-rowtotal">${flF+flP+flS+flFu}</span></td></tr>`;
+  });
+
+  const thRow=`<thead><tr>
+    <th style="background:#443a3a;text-align:left;padding-left:8px">—</th>
+    <th style="background:#27ae60">Free<br><span style="font-size:9px">0 Qty</span></th>
+    <th style="background:#e67e22">Partial<br><span style="font-size:9px">1-10</span></th>
+    <th style="background:#7e5233">Semi<br><span style="font-size:9px">11-30</span></th>
+    <th style="background:#c0392b">Full<br><span style="font-size:9px">31+</span></th>
+    <th style="background:#443a3a">Total</th>
+  </tr></thead>`;
+
+  wrap.innerHTML=`
+    <div class="section-box"><span class="section-title">⚡ Capacity Metrics — By Floor</span>
+      <div style="font-size:10px;color:#888;text-align:right;margin-bottom:4px">Total: ${(gF+gP+gS+gFu).toLocaleString('en-IN')} locations</div>
+      <table class="summary-table">${thRow}<tbody>${rows}</tbody></table></div>
+    <div class="section-box"><span class="section-title">📦 Shelve Type Totals (All Floors)</span>
+      <table class="summary-table">${thRow}<tbody>${trows}</tbody></table></div>
+    <div class="section-box"><span class="section-title">🏢 Floor × Shelve Type Breakdown (Qty)</span>
+      <table class="summary-table">${thRow}<tbody>${brows}</tbody></table></div>`;
 }
 
 function renderLbhBins(targetId){
   const wrap=document.getElementById(targetId);if(!wrap)return;
+
+  const lbhTH=`<thead><tr>
+    <th style="background:#443a3a;text-align:left;padding-left:8px">—</th>
+    <th style="background:#27ae60">Free<br><span style="font-size:9px">0%</span></th>
+    <th style="background:#3498db">Semi<br><span style="font-size:9px">1-30%</span></th>
+    <th style="background:#e67e22">Partial<br><span style="font-size:9px">31-70%</span></th>
+    <th style="background:#c0392b">Full<br><span style="font-size:9px">71%+</span></th>
+    <th style="background:#443a3a">Total</th>
+  </tr></thead>`;
+
+  // ── Floor summary ──
   const flMap={};
   LOCS.forEach(loc=>{
     const r=lbhRemark(loc.availCuftPct,loc.totalQty);const fl=loc.floor||'Unknown';
@@ -1143,15 +1208,52 @@ function renderLbhBins(targetId){
     rows+=`<tr><td class="row-title">${fl}</td><td><span class="badge-counter bg-free">${c.free}</span></td><td><span class="badge-counter" style="background:#3498db">${c.semi}</span></td><td><span class="badge-counter bg-partial">${c.partial}</span></td><td><span class="badge-counter bg-full">${c.full}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
   });
   rows+=`<tr style="border-top:2px solid #443a3a"><td class="row-title" style="background:#443a3a;color:#fff">TOTAL</td><td><span class="badge-counter bg-free">${gF}</span></td><td><span class="badge-counter" style="background:#3498db">${gS}</span></td><td><span class="badge-counter bg-partial">${gP}</span></td><td><span class="badge-counter bg-full">${gFu}</span></td><td><span class="badge-counter bg-rowtotal">${gF+gS+gP+gFu}</span></td></tr>`;
-  wrap.innerHTML=`<div class="section-box"><span class="section-title">📐 LBH Capacity — By Floor</span>
-    <table class="summary-table"><thead><tr>
-      <th style="background:#443a3a;text-align:left;padding-left:8px">Floor</th>
-      <th style="background:#27ae60">Free<br><span style="font-size:9px">0%</span></th>
-      <th style="background:#3498db">Semi<br><span style="font-size:9px">1-30%</span></th>
-      <th style="background:#e67e22">Partial<br><span style="font-size:9px">31-70%</span></th>
-      <th style="background:#c0392b">Full<br><span style="font-size:9px">71%+</span></th>
-      <th style="background:#443a3a">Total</th>
-    </tr></thead><tbody>${rows}</tbody></table></div>`;
+
+  // ── Shelve Type summary (LBH) ──
+  const typeMap={};
+  LOCS.forEach(loc=>{
+    const r=lbhRemark(loc.availCuftPct,loc.totalQty); const t=loc.type||'Unknown';
+    if(!typeMap[t])typeMap[t]={free:0,semi:0,partial:0,full:0};
+    if(r==='LBH-Free')typeMap[t].free++;else if(r==='LBH-Semi')typeMap[t].semi++;else if(r==='LBH-Partial')typeMap[t].partial++;else if(r==='LBH-Full')typeMap[t].full++;
+  });
+  let trows='',tF=0,tS=0,tP=0,tFu=0;
+  Object.keys(typeMap).sort().forEach(t=>{
+    const c=typeMap[t]; const tot=c.free+c.semi+c.partial+c.full;
+    tF+=c.free;tS+=c.semi;tP+=c.partial;tFu+=c.full;
+    trows+=`<tr><td class="row-title">${t}</td><td><span class="badge-counter bg-free">${c.free}</span></td><td><span class="badge-counter" style="background:#3498db">${c.semi}</span></td><td><span class="badge-counter bg-partial">${c.partial}</span></td><td><span class="badge-counter bg-full">${c.full}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
+  });
+  trows+=`<tr style="border-top:2px solid #443a3a"><td class="row-title" style="background:#443a3a;color:#fff">TOTAL</td><td><span class="badge-counter bg-free">${tF}</span></td><td><span class="badge-counter" style="background:#3498db">${tS}</span></td><td><span class="badge-counter bg-partial">${tP}</span></td><td><span class="badge-counter bg-full">${tFu}</span></td><td><span class="badge-counter bg-rowtotal">${tF+tS+tP+tFu}</span></td></tr>`;
+
+  // ── Floor × Shelve Type (LBH) ──
+  const flTypeMap={};
+  LOCS.forEach(loc=>{
+    const fl=loc.floor||'Unknown'; const t=loc.type||'Unknown';
+    const r=lbhRemark(loc.availCuftPct,loc.totalQty);
+    if(!flTypeMap[fl])flTypeMap[fl]={};
+    if(!flTypeMap[fl][t])flTypeMap[fl][t]={free:0,semi:0,partial:0,full:0};
+    if(r==='LBH-Free')flTypeMap[fl][t].free++;else if(r==='LBH-Semi')flTypeMap[fl][t].semi++;else if(r==='LBH-Partial')flTypeMap[fl][t].partial++;else if(r==='LBH-Full')flTypeMap[fl][t].full++;
+  });
+  let brows='';
+  Object.keys(flTypeMap).sort().forEach(fl=>{
+    let flF=0,flS=0,flP=0,flFu=0;
+    const types=flTypeMap[fl];
+    brows+=`<tr><td colspan="6" style="background:#443a3a;color:#FFD700;font-weight:800;padding:6px 8px;font-size:10px">🏢 ${fl}</td></tr>`;
+    Object.keys(types).sort().forEach(t=>{
+      const c=types[t]; const tot=c.free+c.semi+c.partial+c.full;
+      flF+=c.free;flS+=c.semi;flP+=c.partial;flFu+=c.full;
+      brows+=`<tr><td style="padding-left:14px;font-size:10px;color:#555;font-weight:600">${t}</td><td><span class="badge-counter bg-free">${c.free}</span></td><td><span class="badge-counter" style="background:#3498db">${c.semi}</span></td><td><span class="badge-counter bg-partial">${c.partial}</span></td><td><span class="badge-counter bg-full">${c.full}</span></td><td><span class="badge-counter bg-rowtotal">${tot}</span></td></tr>`;
+    });
+    brows+=`<tr style="background:#f0e8e8"><td style="padding-left:8px;font-weight:800;font-size:10px;color:#7B1818">${fl} Subtotal</td><td><span class="badge-counter bg-free">${flF}</span></td><td><span class="badge-counter" style="background:#3498db">${flS}</span></td><td><span class="badge-counter bg-partial">${flP}</span></td><td><span class="badge-counter bg-full">${flFu}</span></td><td><span class="badge-counter bg-rowtotal">${flF+flS+flP+flFu}</span></td></tr>`;
+  });
+
+  wrap.innerHTML=`
+    <div class="section-box"><span class="section-title">📐 LBH Capacity — By Floor</span>
+      <div style="font-size:10px;color:#888;text-align:right;margin-bottom:4px">Total: ${(gF+gS+gP+gFu).toLocaleString('en-IN')} locations</div>
+      <table class="summary-table">${lbhTH}<tbody>${rows}</tbody></table></div>
+    <div class="section-box"><span class="section-title">📐 LBH Shelve Type Totals (All Floors)</span>
+      <table class="summary-table">${lbhTH}<tbody>${trows}</tbody></table></div>
+    <div class="section-box"><span class="section-title">🏢 Floor × Shelve Type Breakdown (LBH)</span>
+      <table class="summary-table">${lbhTH}<tbody>${brows}</tbody></table></div>`;
 }
 
 window.addEventListener('load',()=>{
