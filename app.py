@@ -86,29 +86,20 @@ def load_physical_shelve():
             # Normalize headers: strip spaces
             headers = [h.strip() for h in raw_headers]
             print(f"[PHYS] Headers: {headers}")
-            # Find columns by position (A=0,B=1,C=2,D=3) since headers may vary
-            # Col A = shelve prefix (Lower/Upper/Bulk/LSS/SAAR)
-            # Col B = shelve suffix (Shelve/Location)
-            # Col C = full shelf label (e.g. F0-PZ01-A01-R01-A1)
-            # Col D = Cufeet capacity
-            idx_a    = 0  # "Lower", "Upper", "Bulk", "LSS", "SAAR"
-            idx_b    = 1  # "Shelve", "Location"
-            idx_shelf= 2  # full shelf label
-            idx_cuft = 3  # cufeet number
+            # physical_shelve.csv has 3 columns:
+            # Col 0: "Shelve Type" (e.g. "Lower Shelve", "Bulk Location", "SAAR Location")
+            # Col 1: "Shelf" (full label e.g. F0-PZ01-A01-R01-A1)
+            # Col 2: "Cufeet"
+            idx_type  = 0
+            idx_shelf = 1
+            idx_cuft  = 2
             for row in reader:
-                if len(row) < 3: continue
-                col_a  = str(row[idx_a]).strip()  if idx_a  < len(row) else ""
-                col_b  = str(row[idx_b]).strip()  if idx_b  < len(row) else ""
-                shelf  = str(row[idx_shelf]).strip() if idx_shelf < len(row) else ""
-                cuft_r = str(row[idx_cuft]).strip() if idx_cuft < len(row) else ""
+                if len(row) < 2: continue
+                full_type = str(row[idx_type]).strip() if idx_type < len(row) else "Standard Location"
+                shelf     = str(row[idx_shelf]).strip() if idx_shelf < len(row) else ""
+                cuft_r    = str(row[idx_cuft]).strip() if idx_cuft < len(row) else ""
                 if not shelf: continue
-                # Build type name: "Lower Shelve", "Upper Shelve", "Bulk Location", "LSS Location", "SAAR Location"
-                if col_a and col_b:
-                    full_type = col_a + " " + col_b
-                elif col_a:
-                    full_type = col_a
-                else:
-                    full_type = "Standard Location"
+                if not full_type: full_type = "Standard Location"
                 try:    cufeet = float(cuft_r)
                 except: cufeet = 0.0
                 result[shelf] = {"type": full_type, "cufeet": cufeet}
