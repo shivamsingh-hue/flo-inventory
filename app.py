@@ -23,7 +23,9 @@ CACHE_TTL   = 280  # seconds
 # ── GitHub fetch ──────────────────────────────────────────
 def refresh_file(filename, local_path):
     now = time.time()
-    if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
+    # DB: re-fetch every 60s max; other files: cache for CACHE_TTL
+    ttl = 60 if filename == "flo_inventory.db" else CACHE_TTL
+    if now - _cache_ts.get(filename, 0) < ttl and os.path.exists(local_path):
         return
     try:
         bust = int(time.time())
@@ -78,29 +80,39 @@ def load_physical_shelve():
     if not os.path.exists(PHYS):
         return result
     try:
-        with open(PHYS, newline='', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
+        with open(PHYS, newline='', encoding='utf-8-sig') as f:
+            reader = csv.reader(f)
+            raw_headers = next(reader, [])
+            # Normalize headers: strip spaces
+            headers = [h.strip() for h in raw_headers]
+            print(f"[PHYS] Headers: {headers}")
+            # Find columns by position (A=0,B=1,C=2,D=3) since headers may vary
+            # Col A = shelve prefix (Lower/Upper/Bulk/LSS/SAAR)
+            # Col B = shelve suffix (Shelve/Location)
+            # Col C = full shelf label (e.g. F0-PZ01-A01-R01-A1)
+            # Col D = Cufeet capacity
+            idx_a    = 0  # "Lower", "Upper", "Bulk", "LSS", "SAAR"
+            idx_b    = 1  # "Shelve", "Location"
+            idx_shelf= 2  # full shelf label
+            idx_cuft = 3  # cufeet number
             for row in reader:
-                # headers: Shelve(A), Type(B), Shelf(C=full label), Cufeet(D)
-                shelf  = str(row.get("Shelf","") or "").strip()
-                stype  = str(row.get("Type","") or "").strip()
-                # combine col A+B for full type name: "Lower Shelve", "Upper Shelve" etc
-                col_a  = str(row.get("Shelve","") or "").strip()
-                col_b  = str(row.get("Type","") or "").strip()
-                # physical_shelve.csv: col A = "Lower/Upper/Bulk/LSS/SAAR", col B = "Shelve/Location"
-                # combine: "Lower"+"Shelve"="Lower Shelve", "SAAR"+"Location"="SAAR Location"
+                if len(row) < 3: continue
+                col_a  = str(row[idx_a]).strip()  if idx_a  < len(row) else ""
+                col_b  = str(row[idx_b]).strip()  if idx_b  < len(row) else ""
+                shelf  = str(row[idx_shelf]).strip() if idx_shelf < len(row) else ""
+                cuft_r = str(row[idx_cuft]).strip() if idx_cuft < len(row) else ""
+                if not shelf: continue
+                # Build type name: "Lower Shelve", "Upper Shelve", "Bulk Location", "LSS Location", "SAAR Location"
                 if col_a and col_b:
                     full_type = col_a + " " + col_b
                 elif col_a:
                     full_type = col_a
                 else:
-                    full_type = col_b or "Standard Location"
-                cufeet_raw = row.get("Cufeet","") or ""
-                try:    cufeet = float(str(cufeet_raw).strip())
+                    full_type = "Standard Location"
+                try:    cufeet = float(cuft_r)
                 except: cufeet = 0.0
-                if shelf:
-                    result[shelf] = {"type": full_type or "Standard Location",
-                                     "cufeet": cufeet}
+                result[shelf] = {"type": full_type, "cufeet": cufeet}
+        print(f"[PHYS] Loaded {len(result)} shelves. Sample types: {list(set(v['type'] for v in list(result.values())[:20]))}")
     except Exception as e:
         print(f"[ERR] physical_shelve: {e}")
     return result
