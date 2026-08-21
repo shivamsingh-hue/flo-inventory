@@ -87,7 +87,14 @@ def load_physical_shelve():
                 # combine col A+B for full type name: "Lower Shelve", "Upper Shelve" etc
                 col_a  = str(row.get("Shelve","") or "").strip()
                 col_b  = str(row.get("Type","") or "").strip()
-                full_type = (col_a + " " + col_b).strip() if col_a else col_b
+                # physical_shelve.csv: col A = "Lower/Upper/Bulk/LSS/SAAR", col B = "Shelve/Location"
+                # combine: "Lower"+"Shelve"="Lower Shelve", "SAAR"+"Location"="SAAR Location"
+                if col_a and col_b:
+                    full_type = col_a + " " + col_b
+                elif col_a:
+                    full_type = col_a
+                else:
+                    full_type = col_b or "Standard Location"
                 cufeet_raw = row.get("Cufeet","") or ""
                 try:    cufeet = float(str(cufeet_raw).strip())
                 except: cufeet = 0.0
@@ -648,7 +655,15 @@ FRONTEND = r"""<!DOCTYPE html>
   <div style="padding:8px 14px">
     <button class="back-btn" onclick="goHome()" style="color:#7B1818">‹ Back</button>
     <label style="color:#7B1818;font-weight:800">⚡ Scan Location / FSN / WID / EAN</label>
-    <input type="text" id="scanInput" class="scan-box" placeholder="Scan or type..." oninput="scanDebounced()">
+    <div style="position:relative">
+      <input type="text" id="scanInput" class="scan-box" placeholder="Scan or type..." oninput="scanDebounced()" style="padding-right:52px">
+      <button onclick="toggleScanner()" id="camBtn" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#7B1818;border:none;border-radius:6px;cursor:pointer;padding:6px 10px;font-size:18px" title="Camera Scanner">📷</button>
+    </div>
+    <div id="scannerBox" style="display:none;margin-top:8px;border-radius:10px;overflow:hidden;position:relative">
+      <video id="camVideo" style="width:100%;display:block" playsinline autoplay muted></video>
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:70%;height:2px;background:#FFD700;box-shadow:0 0 8px #FFD700"></div>
+      <button onclick="toggleScanner()" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);color:#fff;border:none;border-radius:50%;width:30px;height:30px;font-size:16px;cursor:pointer">✕</button>
+    </div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <span id="scanCount" style="font-size:12px;color:#666"></span>
       <a class="dl-btn" href="/download">⬇ Download CSV</a>
@@ -1268,6 +1283,40 @@ window.addEventListener('load',()=>{
   }
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-_lastLoad>30000)loadData()});
 });
+
+let _scanning=false;
+async function toggleScanner(){
+  if(_scanning){stopScanner();return;}
+  const box=document.getElementById('scannerBox');
+  const video=document.getElementById('camVideo');
+  box.style.display='block';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}});
+    video.srcObject=stream;await video.play();
+    _scanning=true;
+    if(window.BarcodeDetector){
+      const detector=new BarcodeDetector({formats:['ean_13','ean_8','code_128','qr_code','code_39']});
+      const detect=async()=>{
+        if(!_scanning)return;
+        try{
+          const codes=await detector.detect(video);
+          if(codes.length>0){
+            document.getElementById('scanInput').value=codes[0].rawValue;
+            doScan();stopScanner();return;
+          }
+        }catch(e){}
+        requestAnimationFrame(detect);
+      };
+      detect();
+    }
+  }catch(e){box.style.display='none';alert('Camera error: '+e.message);}
+}
+function stopScanner(){
+  _scanning=false;
+  const video=document.getElementById('camVideo');
+  if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
+  document.getElementById('scannerBox').style.display='none';
+}
 </script>
 </body>
 </html>"""
