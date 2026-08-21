@@ -23,8 +23,10 @@ CACHE_TTL   = 280  # seconds
 # ── GitHub fetch ──────────────────────────────────────────
 def refresh_file(filename, local_path):
     now = time.time()
-    if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
-        return
+    # DB always re-fetched — other files cached for CACHE_TTL
+    if filename != "flo_inventory.db":
+        if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
+            return
     try:
         req = urllib.request.Request(
             GITHUB_RAW + filename,
