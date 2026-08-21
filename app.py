@@ -1,54 +1,121 @@
 """
 app.py — DIC-LIVE GUIDED PUTAWAY V3.0 — Flask/SQLite edition
-Runs on Render. Reads flo_inventory.db.
+Runs on Render. Reads flo_inventory.db + physical_shelve.csv + inventory_lbh.csv + casper_ids.csv
 """
-import sqlite3, os, csv, io, json, re
-from flask import Flask, render_template_string, request, Response, jsonify, session
-from functools import wraps
-import datetime
+import sqlite3, os, csv, io, json, re, time, urllib.request
+from flask import Flask, render_template_string, request, Response, jsonify
+import datetime, threading
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dic-flo-2024-render")
-DB = os.path.join(os.path.dirname(__file__), "flo_inventory.db")
 
-# GitHub raw URL to always fetch latest DB
-GITHUB_RAW_DB = "https://raw.githubusercontent.com/shivamsingh-hue/flo-inventory/main/flo_inventory.db"
-GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
+DB   = os.path.join(os.path.dirname(__file__), "flo_inventory.db")
+PHYS = os.path.join(os.path.dirname(__file__), "physical_shelve.csv")
+LBH  = os.path.join(os.path.dirname(__file__), "inventory_lbh.csv")
+CID  = os.path.join(os.path.dirname(__file__), "casper_ids.csv")
 
-_db_cache_ts = 0
-_db_cache_ttl = 280  # seconds — refresh DB every ~5 mins
+GITHUB_RAW   = "https://raw.githubusercontent.com/shivamsingh-hue/flo-inventory/main/"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
-def refresh_db_from_github():
-    """Download latest flo_inventory.db from GitHub if cache is stale."""
-    global _db_cache_ts
-    import time, urllib.request
+_cache_ts   = {}   # file -> last fetch time
+CACHE_TTL   = 280  # seconds
+
+# ── GitHub fetch ──────────────────────────────────────────
+def refresh_file(filename, local_path):
     now = time.time()
-    if now - _db_cache_ts < _db_cache_ttl and os.path.exists(DB):
-        return  # still fresh
+    if now - _cache_ts.get(filename, 0) < CACHE_TTL and os.path.exists(local_path):
+        return
     try:
         req = urllib.request.Request(
-            GITHUB_RAW_DB,
+            GITHUB_RAW + filename,
             headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Cache-Control": "no-cache",
-                     "User-Agent": "flo-app"}
+                     "Cache-Control": "no-cache", "User-Agent": "flo-app"}
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read()
-        with open(DB, "wb") as f:
+        with open(local_path, "wb") as f:
             f.write(data)
-        _db_cache_ts = time.time()
-        print(f"[DB] Refreshed from GitHub ({len(data)//1024} KB)")
+        _cache_ts[filename] = time.time()
+        print(f"[OK] Refreshed {filename} ({len(data)//1024} KB)")
     except Exception as e:
-        print(f"[DB] GitHub refresh failed: {e}")
+        print(f"[ERR] {filename}: {e}")
 
-# ── Casper IDs (add your team's IDs here, or load from DB if you add a table) ──
-CASPER_IDS = {
-    # "ID": {"name": "Full Name", "dept": "Department"}
-    # Example: "C12345": {"name": "Shivam Singh", "dept": "IMT"}
-    # Add all IDs here — or leave empty to allow any login
-}
-ALLOW_ANY_LOGIN = True  # set False to restrict to CASPER_IDS only
+def refresh_all():
+    refresh_file("flo_inventory.db",      DB)
+    refresh_file("physical_shelve.csv",   PHYS)
+    refresh_file("inventory_lbh.csv",     LBH)
+    refresh_file("casper_ids.csv",        CID)
 
+# ── Casper ID loader ──────────────────────────────────────
+def load_casper_ids():
+    """Returns dict: casper_id -> {name, dept}"""
+    refresh_file("casper_ids.csv", CID)
+    result = {}
+    if not os.path.exists(CID):
+        return result
+    try:
+        with open(CID, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # headers: Casper, Employee Name, Deparment
+                cid  = str(row.get("Casper","") or "").strip()
+                name = str(row.get("Employee Name","") or "").strip()
+                dept = str(row.get("Deparment","") or "").strip()
+                if cid:
+                    result[cid] = {"name": name or cid, "dept": dept}
+    except Exception as e:
+        print(f"[ERR] casper_ids: {e}")
+    return result
+
+# ── Physical Shelve loader ────────────────────────────────
+def load_physical_shelve():
+    """Returns dict: shelf_label -> {type, cufeet}"""
+    refresh_file("physical_shelve.csv", PHYS)
+    result = {}
+    if not os.path.exists(PHYS):
+        return result
+    try:
+        with open(PHYS, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # headers: Shelve(A), Type(B), Shelf(C=full label), Cufeet(D)
+                shelf  = str(row.get("Shelf","") or "").strip()
+                stype  = str(row.get("Type","") or "").strip()
+                # combine col A+B for full type name: "Lower Shelve", "Upper Shelve" etc
+                col_a  = str(row.get("Shelve","") or "").strip()
+                col_b  = str(row.get("Type","") or "").strip()
+                full_type = (col_a + " " + col_b).strip() if col_a else col_b
+                cufeet_raw = row.get("Cufeet","") or ""
+                try:    cufeet = float(str(cufeet_raw).strip())
+                except: cufeet = 0.0
+                if shelf:
+                    result[shelf] = {"type": full_type or "Standard Location",
+                                     "cufeet": cufeet}
+    except Exception as e:
+        print(f"[ERR] physical_shelve: {e}")
+    return result
+
+# ── LBH loader ────────────────────────────────────────────
+def load_lbh():
+    """Returns dict: fsn -> cuft_per_unit"""
+    refresh_file("inventory_lbh.csv", LBH)
+    result = {}
+    if not os.path.exists(LBH):
+        return result
+    try:
+        with open(LBH, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                fsn = str(row.get("product_detail_fsn","") or "").strip()
+                try:    cuft = float(str(row.get("Cuft_per_Unit","0") or "0").strip())
+                except: cuft = 0.0
+                if fsn and cuft > 0:
+                    result[fsn] = cuft
+    except Exception as e:
+        print(f"[ERR] lbh: {e}")
+    return result
+
+# ── SQLite ────────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(DB, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -74,28 +141,10 @@ def remark_for_qty(qty):
     if qty <= 30: return "Semi Space"
     return "Full Space"
 
-def lbh_remark(avail_pct, total_qty):
-    if avail_pct is None or avail_pct == '':
-        return "LBH-Free" if (not total_qty or total_qty == 0) else ""
-    try: avail = float(avail_pct)
-    except: return "LBH-Free"
-    util = 100 - avail
-    if util <= 0:  return "LBH-Free"
-    if util <= 30: return "LBH-Semi"
-    if util <= 70: return "LBH-Partial"
-    return "LBH-Full"
-
-def get_pull_ts():
-    try:
-        conn = get_db()
-        row = conn.execute("SELECT MAX(_pull_ts) FROM inventory").fetchone()
-        conn.close()
-        return row[0] if row else None
-    except: return None
-
 def load_inventory():
-    refresh_db_from_github()
-    if not os.path.exists(DB): return [], None
+    refresh_all()
+    if not os.path.exists(DB):
+        return {"loc_qty": {}, "loc_items": {}, "pull_ts": None}
     try:
         conn = get_db()
         pull_ts = None
@@ -103,15 +152,14 @@ def load_inventory():
             r = conn.execute("SELECT MAX(_pull_ts) FROM inventory").fetchone()
             pull_ts = r[0] if r else None
         except: pass
-        cur = conn.execute("SELECT * FROM inventory")
+        cur  = conn.execute("SELECT * FROM inventory")
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         conn.close()
 
-        # Find column indices — matched to actual FLO SQLite columns
         def fc(names):
             for n in names:
-                for i,c in enumerate(cols):
+                for i, c in enumerate(cols):
                     if c.strip().lower() == n.lower(): return i
             return -1
 
@@ -120,10 +168,9 @@ def load_inventory():
         i_shelf = fc(["Shelf","shelf","storage_location_label","location"])
         i_qty   = fc(["Qty","qty","inventory_item_quantity","quantity"])
         i_prod  = fc(["Product","product","product_detail_product_title","title"])
-        i_zone  = fc(["Storage_Zone","storage_zone","zone"])
 
-        loc_qty   = {}  # shelf -> total qty
-        loc_items = {}  # shelf -> list of items
+        loc_qty   = {}
+        loc_items = {}
 
         for row in rows:
             row = list(row)
@@ -131,22 +178,21 @@ def load_inventory():
             if re.match(r'^(previous|next|FSN)$', fsn0, re.I): continue
             shelf = str(row[i_shelf]).strip() if i_shelf >= 0 else ""
             if not shelf or re.search(r'[←→]', shelf): continue
-            qty   = 0
-            if i_qty >= 0 and row[i_qty] not in (None, "", "N/A"):
+            qty = 0
+            if i_qty >= 0 and row[i_qty] not in (None,"","N/A"):
                 try: qty = float(row[i_qty])
                 except: qty = 0
-            prod  = str(row[i_prod]).strip() if i_prod >= 0 else ""
-            wid   = str(row[i_wid]).strip() if i_wid >= 0 else "N/A"
-            zone  = str(row[i_zone]).strip() if i_zone >= 0 and row[i_zone] else ""
-            eans  = extract_ean(prod)
-            ean   = eans[0] if eans else "N/A"
-            fsn   = fsn0 or "N/A"
+            prod = str(row[i_prod]).strip() if i_prod >= 0 else ""
+            wid  = str(row[i_wid]).strip() if i_wid >= 0 else "N/A"
+            eans = extract_ean(prod)
+            ean  = eans[0] if eans else "N/A"
+            fsn  = fsn0 or "N/A"
 
             loc_qty[shelf] = loc_qty.get(shelf, 0) + qty
             if shelf not in loc_items: loc_items[shelf] = []
             loc_items[shelf].append({
                 "fsn": fsn, "wid": wid, "ean": ean, "eans": eans,
-                "rawProd": prod, "itemQty": qty, "zone": zone
+                "rawProd": prod, "itemQty": qty
             })
 
         return {"loc_qty": loc_qty, "loc_items": loc_items, "pull_ts": pull_ts}
@@ -154,44 +200,58 @@ def load_inventory():
         print("load_inventory error:", e)
         return {"loc_qty": {}, "loc_items": {}, "pull_ts": None}
 
-def build_locations(inv):
-    """
-    Shelf labels look like: F2-PZ01-A01-R29-D1
-      parts[0] = Floor  (F2, HV, F4 ...)
-      parts[1] = Zone   (PZ01, PZ02 ...)
-      parts[2] = Aisle  (A01, A02 ...)
-      rest     = rack/bin detail
-    """
-    locs = []
+def build_locations(inv, phys, lbh):
+    locs      = []
     loc_qty   = inv.get("loc_qty", {})
     loc_items = inv.get("loc_items", {})
-    for shelf, qty in loc_qty.items():
+
+    # Universe = all physical shelves + any FLO-only shelves
+    universe = {}
+    for shelf, info in phys.items():
+        universe[shelf] = info
+    for shelf in loc_qty:
+        if shelf not in universe:
+            universe[shelf] = {"type": "FLO Feed", "cufeet": 0.0}
+
+    for shelf, info in universe.items():
+        qty    = loc_qty.get(shelf, 0)
         parts  = shelf.split("-")
         floor  = parts[0] if parts else "Unknown"
         pz     = parts[1] if len(parts) > 1 else ""
         aisle  = parts[2] if len(parts) > 2 else ""
         remark = remark_for_qty(qty)
-        # derive shelve type from zone prefix
-        shelve_type = "Standard Location"
-        if pz.upper().startswith("PZ"):
-            shelve_type = "Standard Location"
+        cufeet = info.get("cufeet", 0.0)
+
+        # LBH calc: sum(qty * cuft_per_unit) for items in this shelf
+        total_qty_cuft = 0.0
+        items = loc_items.get(shelf, [])
+        for it in items:
+            cuft_unit = lbh.get(it["fsn"], 0.0)
+            total_qty_cuft += it["itemQty"] * cuft_unit
+
+        if cufeet and cufeet > 0:
+            util_pct  = min(round((total_qty_cuft / cufeet) * 100, 2), 100)
+            avail_pct = round(100 - util_pct, 2)
+        else:
+            util_pct  = ""
+            avail_pct = ""
+
         locs.append({
-            "label":       shelf,
-            "floor":       floor,
-            "pz":          pz,
-            "aisle":       aisle,
-            "type":        shelve_type,
-            "totalQty":    qty,
-            "remark":      remark,
-            "cufeet":      "",
-            "totalQtyCuft": "",
-            "availCuftPct": "",
+            "label":        shelf,
+            "floor":        floor,
+            "pz":           pz,
+            "aisle":        aisle,
+            "type":         info.get("type", "Standard Location"),
+            "totalQty":     qty,
+            "remark":       remark,
+            "cufeet":       cufeet if cufeet else "",
+            "totalQtyCuft": round(total_qty_cuft, 4) if total_qty_cuft else "",
+            "availCuftPct": avail_pct,
         })
     return locs
 
 def build_raw(inv, locs):
-    raw = []
-    loc_qty   = inv.get("loc_qty", {})
+    raw       = []
     loc_items = inv.get("loc_items", {})
     for loc in locs:
         shelf = loc["label"]
@@ -200,7 +260,8 @@ def build_raw(inv, locs):
             for it in items:
                 raw.append({**loc, **it})
         else:
-            raw.append({**loc, "fsn":"N/A","wid":"N/A","ean":"N/A","eans":[],"itemQty":0,"rawProd":""})
+            raw.append({**loc, "fsn":"N/A","wid":"N/A","ean":"N/A",
+                        "eans":[],"itemQty":0,"rawProd":""})
     return raw
 
 def build_metrics(locs):
@@ -208,19 +269,56 @@ def build_metrics(locs):
     for loc in locs:
         fl = loc["floor"]
         r  = loc["remark"]
-        if fl not in floor_map: floor_map[fl] = {"floor":fl,"free":0,"partial":0,"semi":0,"full":0}
-        if "Free"    in r: floor_map[fl]["free"]    += 1
+        if fl not in floor_map:
+            floor_map[fl] = {"floor":fl,"free":0,"partial":0,"semi":0,"full":0}
+        if   "Free"    in r: floor_map[fl]["free"]    += 1
         elif "Partial" in r: floor_map[fl]["partial"] += 1
         elif "Semi"    in r: floor_map[fl]["semi"]    += 1
         elif "Full"    in r: floor_map[fl]["full"]    += 1
     return sorted(floor_map.values(), key=lambda x: x["floor"])
 
-# ── Action log (in-memory, resets on restart — good enough for shift tracking) ──
+# ── Action log ────────────────────────────────────────────
 action_log = []
 
-MAIN_HTML = open(os.path.join(os.path.dirname(__file__), "index.html")).read() \
-    if os.path.exists(os.path.join(os.path.dirname(__file__), "index.html")) else ""
+def build_action_summary():
+    tz_offset = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    now       = datetime.datetime.now(tz_offset)
+    today_str = now.strftime("%Y-%m-%d")
+    h = now.hour
+    if 9 <= h < 19: shift_label = "🌅 Morning Shift • 9 AM – 7 PM"
+    elif h >= 20:   shift_label = "🌙 Night Shift • 8 PM – 5 AM"
+    else:           shift_label = "🌙 Night Shift • 8 PM – 5 AM"
 
+    by_action = {}; by_user = {}; recent = []
+    for entry in action_log:
+        act  = entry["action"]; user = entry["user"]; ts = entry["ts"]
+        is_today = ts.startswith(today_str)
+        if act not in by_action: by_action[act] = {"action":act,"total":0,"today":0}
+        by_action[act]["total"] += 1
+        if is_today: by_action[act]["today"] += 1
+        if user not in by_user:
+            by_user[user] = {"name":user,"casperId":user,"dept":"","count":0,"actions":{}}
+        by_user[user]["count"] += 1
+        by_user[user]["actions"][act] = by_user[user]["actions"].get(act,0) + 1
+        recent.append({"time":ts[11:16],"name":user,"shelf":entry["shelf"],"action":act,"dept":""})
+
+    by_user_today = sorted(
+        [{"name":v["name"],"casperId":v["casperId"],"dept":v["dept"],"count":v["count"],
+          "actions":[{"action":a,"count":c} for a,c in v["actions"].items()]}
+         for v in by_user.values()], key=lambda x: -x["count"])[:10]
+
+    return {
+        "byAction": list(by_action.values()),
+        "byActionDept": [],
+        "byUserToday": by_user_today,
+        "recent": list(reversed(recent[-20:])),
+        "gtlTracking": [], "putawayTracking": [],
+        "shiftLabel": shift_label,
+        "grandTotal": len(action_log),
+        "grandToday": sum(1 for e in action_log if e["ts"].startswith(today_str))
+    }
+
+# ── Routes ────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template_string(FRONTEND)
@@ -229,17 +327,25 @@ def index():
 def api_login():
     data = request.json or {}
     cid  = str(data.get("id","")).strip()
-    if not cid: return jsonify({"ok": False, "msg": "Enter Casper ID"})
-    if ALLOW_ANY_LOGIN or cid in CASPER_IDS:
-        info = CASPER_IDS.get(cid, {"name": cid, "dept": "N/A"})
-        return jsonify({"ok": True, "name": info.get("name", cid), "dept": info.get("dept","N/A")})
-    return jsonify({"ok": False, "msg": "Invalid Casper ID"})
+    if not cid:
+        return jsonify({"ok": False, "msg": "Enter Casper ID"})
+    casper_ids = load_casper_ids()
+    if not casper_ids:
+        # If CSV not loaded yet, allow any login
+        return jsonify({"ok": True, "name": cid, "dept": "N/A"})
+    if cid in casper_ids:
+        info = casper_ids[cid]
+        return jsonify({"ok": True, "name": info.get("name", cid),
+                        "dept": info.get("dept","N/A")})
+    return jsonify({"ok": False, "msg": "❌ Invalid Casper ID. Access Denied."})
 
 @app.route("/api/data")
 def api_data():
-    inv   = load_inventory()
-    locs  = build_locations(inv)
-    raw   = build_raw(inv, locs)
+    inv     = load_inventory()
+    phys    = load_physical_shelve()
+    lbh     = load_lbh()
+    locs    = build_locations(inv, phys, lbh)
+    raw     = build_raw(inv, locs)
     metrics = build_metrics(locs)
     total_qty = sum(inv.get("loc_qty",{}).values())
     pull_ts   = inv.get("pull_ts","")
@@ -247,19 +353,16 @@ def api_data():
     if pull_ts:
         try:
             dt = datetime.datetime.fromisoformat(pull_ts)
-            ref_label = dt.strftime("%d-%b %H:%M")   # e.g. "20-Aug 15:28"
+            ref_label = dt.strftime("%d-%b %H:%M")
         except: ref_label = pull_ts
-
-    # Action summary from in-memory log
     action_summary = build_action_summary()
-
     resp = jsonify({
-        "rawData": raw,
-        "pureLocationsData": locs,
-        "summaryMetrics": metrics,
-        "actionSummary": action_summary,
-        "totalQty": total_qty,
-        "lastRefresh": ref_label
+        "rawData":          raw,
+        "pureLocationsData":locs,
+        "summaryMetrics":   metrics,
+        "actionSummary":    action_summary,
+        "totalQty":         total_qty,
+        "lastRefresh":      ref_label
     })
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -272,83 +375,56 @@ def api_action():
     action   = data.get("action","")
     user     = data.get("user","")
     now      = datetime.datetime.now().isoformat(timespec="seconds")
-    action_log.append({"ts": now, "shelf": shelf_id, "action": action, "user": user})
+    action_log.append({"ts":now,"shelf":shelf_id,"action":action,"user":user})
     return jsonify({"ok": True})
 
 @app.route("/api/find")
 def api_find():
     q   = request.args.get("q","").strip().lower()
     inv = load_inventory()
-    raw = build_raw(inv, build_locations(inv))
+    phys = load_physical_shelve()
+    lbh  = load_lbh()
+    raw  = build_raw(inv, build_locations(inv, phys, lbh))
     if len(q) < 3: return jsonify([])
     results = []
     for item in raw:
-        matched = False
-        if item["label"].lower() == q: matched = True
-        elif item.get("fsn","").lower() == q: matched = True
-        elif item.get("wid","").lower() == q: matched = True
-        elif any(str(e).lower() == q for e in item.get("eans",[])): matched = True
-        if matched: results.append(item)
+        if item["label"].lower() == q: results.append(item); continue
+        if item.get("fsn","").lower() == q: results.append(item); continue
+        if item.get("wid","").lower() == q: results.append(item); continue
+        if any(str(e).lower() == q for e in item.get("eans",[])): results.append(item)
     return jsonify(results)
 
 @app.route("/download")
 def download():
     inv  = load_inventory()
-    locs = build_locations(inv)
+    phys = load_physical_shelve()
+    lbh  = load_lbh()
+    locs = build_locations(inv, phys, lbh)
     raw  = build_raw(inv, locs)
     out  = io.StringIO()
     w    = csv.writer(out)
-    w.writerow(["Shelf","Floor","Zone","Aisle","Shelve Type","Total Qty","Remark","FSN","WID","EAN","Item Qty"])
+    w.writerow(["Shelf","Floor","Zone","Aisle","Shelve Type","Total Qty","Remark",
+                "Cufeet","Used Cuft","Avail %","FSN","WID","EAN","Item Qty"])
     for r in raw:
         w.writerow([r.get("label",""),r.get("floor",""),r.get("pz",""),r.get("aisle",""),
                     r.get("type",""),r.get("totalQty",""),r.get("remark",""),
+                    r.get("cufeet",""),r.get("totalQtyCuft",""),r.get("availCuftPct",""),
                     r.get("fsn",""),r.get("wid",""),r.get("ean",""),r.get("itemQty","")])
     out.seek(0)
     return Response(out.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition":"attachment; filename=flo_inventory.csv"})
 
-def build_action_summary():
-    tz_offset = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-    now = datetime.datetime.now(tz_offset)
-    today_str = now.strftime("%Y-%m-%d")
-    h = now.hour
-    if 9 <= h < 19:
-        shift_label = "🌅 Morning Shift • 9 AM – 7 PM"
-    elif h >= 20:
-        shift_label = "🌙 Night Shift • 8 PM – 5 AM"
-    else:
-        shift_label = "🌙 Night Shift • 8 PM – 5 AM"
+# ── Keep-alive ────────────────────────────────────────────
+def _keep_alive():
+    time.sleep(300)
+    while True:
+        try: urllib.request.urlopen("https://flo-inventory.onrender.com/", timeout=10)
+        except: pass
+        time.sleep(840)
 
-    by_action = {}; by_user = {}; recent = []
-    for entry in action_log:
-        act = entry["action"]; user = entry["user"]; ts = entry["ts"]
-        is_today = ts.startswith(today_str)
-        if act not in by_action: by_action[act] = {"action": act, "total": 0, "today": 0}
-        by_action[act]["total"] += 1
-        if is_today: by_action[act]["today"] += 1
-        if user not in by_user: by_user[user] = {"name": user, "casperId": user, "dept":"", "count":0, "actions":{}}
-        by_user[user]["count"] += 1
-        by_user[user]["actions"][act] = by_user[user]["actions"].get(act, 0) + 1
-        recent.append({"time": ts[11:16], "name": user, "shelf": entry["shelf"], "action": act, "dept":""})
+threading.Thread(target=_keep_alive, daemon=True).start()
 
-    by_user_today = sorted(
-        [{"name":v["name"],"casperId":v["casperId"],"dept":v["dept"],"count":v["count"],
-          "actions":[{"action":a,"count":c} for a,c in v["actions"].items()]}
-         for v in by_user.values()],
-        key=lambda x: -x["count"])[:10]
-
-    return {
-        "byAction": list(by_action.values()),
-        "byActionDept": [],
-        "byUserToday": by_user_today,
-        "recent": list(reversed(recent[-20:])),
-        "gtlTracking": [],
-        "putawayTracking": [],
-        "shiftLabel": shift_label,
-        "grandTotal": len(action_log),
-        "grandToday": sum(1 for e in action_log if e["ts"].startswith(today_str))
-    }
-
+# ── Frontend ──────────────────────────────────────────────
 FRONTEND = r"""<!DOCTYPE html>
 <html>
 <head>
@@ -360,7 +436,6 @@ FRONTEND = r"""<!DOCTYPE html>
     *{box-sizing:border-box}
     body{font-family:'Poppins',sans-serif;background:#f0f2f5;margin:0;padding:10px}
     .container{background:#fff;width:100%;max-width:480px;border-radius:15px;box-shadow:0 10px 25px rgba(0,0,0,.1);margin:auto;overflow:hidden}
-    /* LOGIN */
     body.login-active{padding:0!important;background:#0D1F3C!important}
     #login-page{position:fixed;inset:0;background:linear-gradient(135deg,#0D1F3C 0%,#1a3a6b 100%);display:flex;align-items:stretch;z-index:9999;min-height:100vh}
     .lo-overlay{width:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:22px 18px 18px;box-sizing:border-box}
@@ -378,7 +453,6 @@ FRONTEND = r"""<!DOCTYPE html>
     .lo-msg{min-height:18px;margin-top:12px;font-size:12px;font-weight:600;color:#ff6b6b;text-align:center}
     .lo-footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px}
     .lo-footer-badge{background:rgba(255,215,0,.12);border:1px solid rgba(255,215,0,.28);border-radius:20px;padding:3px 11px;font-size:9.5px;font-weight:700;color:rgba(255,215,0,.8)}
-    /* HEADER */
     .maroon-hdr{background:#7B1818}
     .gold-stripe{height:5px;background:repeating-linear-gradient(90deg,#FFD700 0,#FFD700 14px,#7B1818 14px,#7B1818 24px)}
     .hdr-inner{padding:12px 14px 10px}
@@ -387,17 +461,14 @@ FRONTEND = r"""<!DOCTYPE html>
     .hdr-stat{background:rgba(255,255,255,.1);border-radius:8px;padding:7px 10px}
     .hdr-sv{font-size:15px;font-weight:800;color:#FFD700}
     .hdr-sl{font-size:8px;color:rgba(255,255,255,.45);margin-top:1px;letter-spacing:.3px;text-transform:uppercase}
-    /* USER BAR */
     .user-bar{background:#4a0f0f;padding:7px 14px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid rgba(255,255,255,.08)}
     .user-bar-label{color:rgba(255,215,0,.92);font-size:10px;font-weight:700;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .logout-btn{background:#FFD700;color:#1a0000;border:none;border-radius:6px;padding:4px 11px;font-size:10px;font-weight:800;cursor:pointer;font-family:'Poppins',sans-serif}
-    /* FOOTER */
     .flo-footer{background:#7B1818;padding:8px 14px;text-align:center}
     .flo-footer-inner{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:3px}
     .flo-badge{display:inline-flex;align-items:center;background:#F7D117;border-radius:6px;padding:4px 12px}
     .flo-badge span{font-size:11px;font-weight:900;color:#e85d00;letter-spacing:.4px}
     .flo-tagline{font-size:9px;color:rgba(255,255,255,.65);font-weight:700;letter-spacing:.4px}
-    /* HOME CARDS */
     .home-cards{background:#fdf5f5;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
     .home-card{background:#fff;border-radius:14px;padding:13px 14px;display:flex;align-items:center;gap:12px;border:1px solid #f0dede;cursor:pointer;box-shadow:0 3px 10px rgba(107,15,26,.1)}
     .home-card:active{transform:scale(.98)}
@@ -408,20 +479,16 @@ FRONTEND = r"""<!DOCTYPE html>
     .hc-pills{display:flex;flex-wrap:wrap;gap:3px}
     .hc-pill{font-size:8.5px;font-weight:700;padding:2px 7px;border-radius:10px}
     .hc-arrow{color:#c9a0a0;font-size:18px;font-weight:700;flex-shrink:0}
-    /* SECTION PAGES */
     .sec-hdr{padding:8px 16px 7px;text-align:center}
     .sec-title{font-size:15px;font-weight:900;color:#FFD700;letter-spacing:.4px}
     .sec-sub{font-size:9px;font-weight:800;color:rgba(255,255,255,.9);margin-top:2px;letter-spacing:.6px;text-transform:uppercase}
     .back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;font-weight:700;font-size:12px;cursor:pointer;padding:0;margin-bottom:12px;font-family:'Poppins',sans-serif}
-    /* TABS */
     .view-tabs{display:flex;background:#e8f0fe;border-radius:8px;margin-bottom:15px;padding:4px;gap:4px}
     .tab-btn{flex:1;border:none;padding:8px 4px;font-size:10px;font-weight:700;cursor:pointer;border-radius:6px;background:transparent;text-transform:uppercase;text-align:center;font-family:'Poppins',sans-serif}
-    /* INPUTS */
     label{font-weight:600;font-size:10px;margin-bottom:3px;display:block;text-transform:uppercase}
     input[type=text]{width:100%;padding:10px;border-radius:8px;border:1px solid #ddd;margin-bottom:12px;font-family:'Poppins',sans-serif;font-size:13px}
     .scan-box{border:2px solid #7B1818!important;background:#fff9f9;font-weight:bold}
     select{width:100%;padding:8px 4px;border-radius:6px;font-size:11px;cursor:pointer;font-family:'Poppins',sans-serif;border:1px solid #ddd}
-    /* PILLS */
     .pill-box{width:100%;border-radius:6px;padding:4px;min-height:40px;max-height:110px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:4px}
     .pill-box.pb-zone{border:2px solid #9b59b6;background:#f4ecf7}
     .pill-box.pb-aisle{border:2px solid #e67e22;background:#fdedec}
@@ -433,7 +500,6 @@ FRONTEND = r"""<!DOCTYPE html>
     .pill-btn.active.pill-aisle{background:#e67e22;color:#fff;border-color:#e67e22}
     .pill-btn.active.pill-remark{background:#27ae60;color:#fff;border-color:#27ae60}
     .pill-btn.active.pill-shelve{background:#16a085;color:#fff;border-color:#16a085}
-    /* CARDS */
     .card{background:#fff;border-left:5px solid #1a73e8;padding:12px;margin-bottom:10px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05)}
     .status-tag{font-size:10px;font-weight:700;float:right;padding:2px 6px;border-radius:4px;text-transform:uppercase}
     .st-free{background:#e6f4ea;color:#1e8e3e}
@@ -446,7 +512,6 @@ FRONTEND = r"""<!DOCTYPE html>
     .pd-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
     .ean-highlight{font-weight:bold;color:#6a1b9a;background:#f3e5f5;padding:1px 5px;border-radius:4px}
     .qty-highlight{font-weight:bold;color:#1a73e8;background:#e8f0fe;padding:1px 5px;border-radius:4px;margin-left:2px}
-    /* LBH */
     .card-lbh{border-left-color:#27ae60}
     .st-lbh-free{background:#e6f4ea;color:#1e8e3e}
     .st-lbh-semi{background:#e8f0fe;color:#1a73e8}
@@ -455,18 +520,15 @@ FRONTEND = r"""<!DOCTYPE html>
     .lbh-bar-bg{background:#e0e0e0;border-radius:6px;height:10px;width:100%;overflow:hidden;margin-top:7px}
     .lbh-bar-fill{height:10px;border-radius:6px}
     .lbh-stats{display:flex;justify-content:space-between;font-size:10px;font-weight:700;margin-top:3px}
-    /* BUTTONS */
     .btn-container{display:flex;gap:5px;margin-top:10px}
     .btn-action{flex:1;border:none;padding:8px 4px;border-radius:5px;font-size:10px;font-weight:600;cursor:pointer;color:#fff;font-family:'Poppins',sans-serif}
     .btn-red{background:#c0392b}.btn-dark{background:#2c3e50}.btn-orange{background:#e67e22}.btn-green{background:#27ae60}
     .btn-itempick{background:#2980b9}.btn-itemput{background:#16a085}
     .gtl-sub{background:#fff8ee;border:1px dashed #e67e22;border-radius:7px;padding:6px 6px 2px;margin-top:4px}
-    /* ACCORDION */
     .accordion-hdr{cursor:pointer;padding:9px 12px;border-radius:7px;margin:6px 10px 0;display:flex;align-items:center;justify-content:space-between;user-select:none}
     .accordion-hdr-p1{background:#f5ecec;border:1px solid #e8c8c8}
     .accordion-hdr-p2{background:#fff3ef;border:1px dashed #e8c8c8;margin-top:10px}
     .accordion-hdr-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.5px}
-    /* SUMMARY */
     .section-box{background:#fafafa;padding:10px;border-radius:8px;border:1px solid #e0e0e0;margin-bottom:10px}
     .section-title{font-size:11px;font-weight:bold;color:#555;display:block;margin-bottom:6px;text-transform:uppercase;text-align:center}
     .summary-table{width:100%;border-collapse:collapse;margin-top:5px;font-size:11px}
@@ -481,13 +543,9 @@ FRONTEND = r"""<!DOCTYPE html>
     .loading-text{text-align:center;font-weight:bold;color:#1a73e8;animation:blink 1.2s infinite;padding:20px 0}
     @keyframes blink{0%{opacity:.4}50%{opacity:1}100%{opacity:.4}}
     .step-floor{border:2px solid #3498db!important;background:#ebf5fb!important}
-    .label-floor{color:#3498db!important}
-    .label-zone{color:#9b59b6!important}
-    .label-aisle{color:#e67e22!important}
-    .label-remark{color:#27ae60!important}
-    .label-shelve{color:#16a085!important}
+    .label-floor{color:#3498db!important}.label-zone{color:#9b59b6!important}.label-aisle{color:#e67e22!important}
+    .label-remark{color:#27ae60!important}.label-shelve{color:#16a085!important}
     .dl-btn{background:#1a1a2e;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px;margin-left:auto}
-    .dl-btn:hover{background:#e94560}
     .row-title{font-weight:bold;background:#f5f5f5;color:#333}
   </style>
 </head>
@@ -587,15 +645,7 @@ FRONTEND = r"""<!DOCTYPE html>
   <div style="padding:8px 14px">
     <button class="back-btn" onclick="goHome()" style="color:#7B1818">‹ Back</button>
     <label style="color:#7B1818;font-weight:800">⚡ Scan Location / FSN / WID / EAN</label>
-<div style="position:relative">
-  <input type="text" id="scanInput" class="scan-box" placeholder="Scan or type..." oninput="scanDebounced()" style="padding-right:52px">
-  <button onclick="toggleScanner()" id="camBtn" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#7B1818;border:none;border-radius:6px;cursor:pointer;padding:6px 10px;font-size:18px" title="Camera Scanner">📷</button>
-</div>
-<div id="scannerBox" style="display:none;margin-top:8px;border-radius:10px;overflow:hidden;position:relative">
-  <video id="camVideo" style="width:100%;display:block" playsinline autoplay muted></video>
-  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:70%;height:2px;background:#FFD700;box-shadow:0 0 8px #FFD700"></div>
-  <button onclick="toggleScanner()" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);color:#fff;border:none;border-radius:50%;width:30px;height:30px;font-size:16px;cursor:pointer">✕</button>
-</div>
+    <input type="text" id="scanInput" class="scan-box" placeholder="Scan or type..." oninput="scanDebounced()">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <span id="scanCount" style="font-size:12px;color:#666"></span>
       <a class="dl-btn" href="/download">⬇ Download CSV</a>
@@ -692,7 +742,7 @@ FRONTEND = r"""<!DOCTYPE html>
 
 <script>
 let USER='',USER_NAME='',RAW=[],LOCS=[],METRICS=[],ACTIONS=null;
-let _scanTimer=null,_loadTimer=null,_lastLoad=0;
+let _scanTimer=null,_lastLoad=0;
 let qZone='',qAisle='',qRemark='',qShelve='',qRemark2='';
 let lZone='',lAisle='',lSpace='',lShelve='',lSpace2='';
 let qPart=1,lPart=1;
@@ -701,8 +751,8 @@ const LBH_SPACES=[{v:'',l:'All'},{v:'LBH-Free',l:'Free 0%'},{v:'LBH-Semi',l:'Sem
 
 function esc(s){return String(s).replace(/'/g,"&#39;")}
 
-// ── LOGIN ──
 document.getElementById('casperId').addEventListener('keydown',e=>{if(e.key==='Enter')checkLogin()});
+
 async function checkLogin(){
   const id=document.getElementById('casperId').value.trim();
   const btn=document.getElementById('loginBtn'),msg=document.getElementById('loginMsg');
@@ -736,7 +786,6 @@ function updateBars(){
   ['homeUser','scanUser','qtyUser','lbhUser'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=lbl});
 }
 
-// ── NAVIGATION ──
 const PAGES=['login-page','home-page','scan-page','qty-page','lbh-page'];
 function showPage(id){PAGES.forEach(p=>{const el=document.getElementById(p);if(el)el.style.display=(p===id?'block':'none')})}
 function showHomePage(){showPage('home-page')}
@@ -747,7 +796,6 @@ function openSection(s){
   else if(s==='lbh'){showPage('lbh-page');switchLTab('putaway');populateFloors('l')}
 }
 
-// ── DATA LOAD ──
 async function loadData(force){
   const now=Date.now();
   if(!force&&now-_lastLoad<8000)return;
@@ -756,25 +804,21 @@ async function loadData(force){
     const r=await fetch('/api/data');
     const d=await r.json();
     RAW=d.rawData||[];LOCS=d.pureLocationsData||[];METRICS=d.summaryMetrics||[];ACTIONS=d.actionSummary||null;
-    // update stats
     const qty=Number(d.totalQty||0).toLocaleString('en-IN');
     const ref=d.lastRefresh||'—';
-    // ref format: "20-Aug 15:28" — show time in top badge, full in stat
     const spIdx=ref.lastIndexOf(' ');
     const timePart=spIdx>=0?ref.substring(spIdx+1):'';
-    const datePart=spIdx>=0?ref.substring(0,spIdx):ref;
     document.getElementById('statQty').textContent=qty;
     document.getElementById('statTime').textContent=timePart+' ✓';
-    document.getElementById('statDate').textContent=ref;  // show full "20-Aug 15:28"
+    document.getElementById('statDate').textContent=ref;
     const free=METRICS.reduce((s,r)=>s+(r.free||0),0);
     const total=METRICS.reduce((s,r)=>s+(r.free||0)+(r.partial||0)+(r.semi||0)+(r.full||0),0);
     document.getElementById('statLoc').textContent=total.toLocaleString('en-IN');
     document.getElementById('statFree').textContent=free.toLocaleString('en-IN');
   }catch(e){console.error('load error',e)}
 }
-setInterval(()=>loadData(),300000); // auto-refresh every 5 mins
+setInterval(()=>loadData(),300000);
 
-// ── SCAN ──
 function scanDebounced(){clearTimeout(_scanTimer);_scanTimer=setTimeout(doScan,220)}
 async function doScan(){
   const q=document.getElementById('scanInput').value.trim();
@@ -794,7 +838,6 @@ async function doScan(){
   div.innerHTML=hits.map(i=>qtyCard(i,'listScan',true)).join('');
 }
 
-// ── QTY SECTION ──
 function switchQTab(t){
   ['putaway','action','bins'].forEach((n,i)=>{
     document.getElementById('qTab'+(i+1)).style.cssText=t===n?'background:#8B1A1A;color:#fff':'color:#8B1A1A';
@@ -810,8 +853,6 @@ function qTogglePart(p){
   document.getElementById('qP1Arrow').textContent=p===1?'▼':'▶';
   document.getElementById('qP2Arrow').textContent=p===2?'▼':'▶';
 }
-
-// ── LBH SECTION ──
 function switchLTab(t){
   ['putaway','action','bins'].forEach((n,i)=>{
     document.getElementById('lTab'+(i+1)).style.cssText=t===n?'background:#A52A2A;color:#fff':'color:#A52A2A';
@@ -828,11 +869,10 @@ function lTogglePart(p){
   document.getElementById('lP2Arrow').textContent=p===2?'▼':'▶';
 }
 
-// ── FLOOR DROPDOWNS ──
 function populateFloors(prefix){
   const floors=[...new Set(LOCS.map(d=>d.floor))].filter(Boolean).sort();
   ['','2'].forEach(sfx=>{
-    const sel=document.getElementById(prefix+'Floor'+sfx); if(!sel)return;
+    const sel=document.getElementById(prefix+'Floor'+sfx);if(!sel)return;
     const old=sel.value;
     sel.innerHTML='<option value="">-- Select --</option>';
     floors.forEach(f=>sel.innerHTML+=`<option value="${f}">${f}</option>`);
@@ -840,16 +880,14 @@ function populateFloors(prefix){
   });
   renderPills(prefix);
 }
-
 function renderPills(prefix){
   if(prefix==='q'){renderQZone();renderQAisle();renderQRemark();renderQShelve();renderQRemark2()}
-  else {renderLZone();renderLAisle();renderLSpace();renderLShelve();renderLSpace2()}
+  else{renderLZone();renderLAisle();renderLSpace();renderLShelve();renderLSpace2()}
 }
 
-// ── QTY PILLS ──
 function renderOptionPills(boxId,opts,selected,cls,fn){
   const box=document.getElementById(boxId);if(!box)return;
-  box.innerHTML=opts.map(o=>`<button type="button" class="pill-btn ${cls}${o.v===selected?' active':''}" onclick="${fn}('${esc(o.v)}')" data-v="${esc(o.v)}">${o.l}</button>`).join('');
+  box.innerHTML=opts.map(o=>`<button type="button" class="pill-btn ${cls}${o.v===selected?' active':''}" onclick="${fn}('${esc(o.v)}')">${o.l}</button>`).join('');
 }
 function renderQRemark(){renderOptionPills('qRemarkBox',QTY_REMARKS,qRemark,'pill-remark','qSelRemark')}
 function qSelRemark(v){qRemark=v;renderQRemark();qShow()}
@@ -858,7 +896,7 @@ function renderQZone(){
   const f=document.getElementById('qFloor').value;
   if(!f){box.innerHTML='<span class="pill-hint">Select Floor first</span>';return}
   const zones=[...new Set(LOCS.filter(d=>d.floor===f).map(d=>d.pz))].filter(Boolean).sort();
-  box.innerHTML=zones.map(z=>`<button type="button" class="pill-btn pill-zone${z===qZone?' active':''}" onclick="qSelZone('${esc(z)}')" data-v="${esc(z)}">${z}</button>`).join('')||'<span class="pill-hint">No zones</span>';
+  box.innerHTML=zones.map(z=>`<button type="button" class="pill-btn pill-zone${z===qZone?' active':''}" onclick="qSelZone('${esc(z)}')">${z}</button>`).join('')||'<span class="pill-hint">No zones</span>';
 }
 function qSelZone(z){qZone=z;qAisle='';renderQZone();renderQAisle();document.getElementById('listQty').innerHTML=''}
 function renderQAisle(){
@@ -866,7 +904,7 @@ function renderQAisle(){
   const f=document.getElementById('qFloor').value;
   if(!f||!qZone){box.innerHTML='<span class="pill-hint">Select Zone first</span>';return}
   const aisles=[...new Set(LOCS.filter(d=>d.floor===f&&d.pz===qZone).map(d=>d.aisle))].filter(Boolean).sort();
-  box.innerHTML=aisles.map(a=>`<button type="button" class="pill-btn pill-aisle${a===qAisle?' active':''}" onclick="qSelAisle('${esc(a)}')" data-v="${esc(a)}">${a}</button>`).join('')||'<span class="pill-hint">No aisles</span>';
+  box.innerHTML=aisles.map(a=>`<button type="button" class="pill-btn pill-aisle${a===qAisle?' active':''}" onclick="qSelAisle('${esc(a)}')">${a}</button>`).join('')||'<span class="pill-hint">No aisles</span>';
 }
 function qSelAisle(a){qAisle=a;renderQAisle();qShow()}
 function qFloorChange(){qZone='';qAisle='';renderQZone();renderQAisle();renderQRemark();document.getElementById('listQty').innerHTML=''}
@@ -881,7 +919,7 @@ function renderQShelve(){
   const f=document.getElementById('qFloor2').value;
   if(!f){box.innerHTML='<span class="pill-hint">Select Floor first</span>';return}
   const types=[...new Set(LOCS.filter(d=>d.floor===f).map(d=>d.type))].filter(t=>t&&t!=='FLO Feed').sort();
-  box.innerHTML=types.map(t=>`<button type="button" class="pill-btn pill-shelve${t===qShelve?' active':''}" onclick="qSelShelve('${esc(t)}')" data-v="${esc(t)}">${t}</button>`).join('')||'<span class="pill-hint">No types</span>';
+  box.innerHTML=types.map(t=>`<button type="button" class="pill-btn pill-shelve${t===qShelve?' active':''}" onclick="qSelShelve('${esc(t)}')">${t}</button>`).join('')||'<span class="pill-hint">No types</span>';
 }
 function qSelShelve(t){qShelve=t;renderQShelve();qShow2()}
 function renderQRemark2(){renderOptionPills('qRemark2Box',QTY_REMARKS,qRemark2,'pill-remark','qSelRemark2')}
@@ -894,7 +932,6 @@ function qShow2(){
   document.getElementById('listQty2').innerHTML=filtered.map(i=>qtyCard(i,'listQty2',false)).join('')||'<div style="color:#c0392b;text-align:center;padding:20px">No results</div>';
 }
 
-// ── LBH PILLS ──
 function lbhRemark(avail,qty){
   if(avail===null||avail===undefined||avail==='')return(!qty||qty===0)?'LBH-Free':'';
   const u=100-parseFloat(avail);
@@ -910,7 +947,7 @@ function renderLZone(){
   const f=document.getElementById('lFloor').value;
   if(!f){box.innerHTML='<span class="pill-hint">Select Floor first</span>';return}
   const zones=[...new Set(LOCS.filter(d=>d.floor===f).map(d=>d.pz))].filter(Boolean).sort();
-  box.innerHTML=zones.map(z=>`<button type="button" class="pill-btn pill-zone${z===lZone?' active':''}" onclick="lSelZone('${esc(z)}')" data-v="${esc(z)}">${z}</button>`).join('')||'<span class="pill-hint">No zones</span>';
+  box.innerHTML=zones.map(z=>`<button type="button" class="pill-btn pill-zone${z===lZone?' active':''}" onclick="lSelZone('${esc(z)}')">${z}</button>`).join('')||'<span class="pill-hint">No zones</span>';
 }
 function lSelZone(z){lZone=z;lAisle='';renderLZone();renderLAisle();document.getElementById('listLbh').innerHTML=''}
 function renderLAisle(){
@@ -918,7 +955,7 @@ function renderLAisle(){
   const f=document.getElementById('lFloor').value;
   if(!f||!lZone){box.innerHTML='<span class="pill-hint">Select Zone first</span>';return}
   const aisles=[...new Set(LOCS.filter(d=>d.floor===f&&d.pz===lZone).map(d=>d.aisle))].filter(Boolean).sort();
-  box.innerHTML=aisles.map(a=>`<button type="button" class="pill-btn pill-aisle${a===lAisle?' active':''}" onclick="lSelAisle('${esc(a)}')" data-v="${esc(a)}">${a}</button>`).join('')||'<span class="pill-hint">No aisles</span>';
+  box.innerHTML=aisles.map(a=>`<button type="button" class="pill-btn pill-aisle${a===lAisle?' active':''}" onclick="lSelAisle('${esc(a)}')">${a}</button>`).join('')||'<span class="pill-hint">No aisles</span>';
 }
 function lSelAisle(a){lAisle=a;renderLAisle();lShow()}
 function lFloorChange(){lZone='';lAisle='';renderLZone();renderLAisle();renderLSpace();document.getElementById('listLbh').innerHTML=''}
@@ -934,7 +971,7 @@ function renderLShelve(){
   const f=document.getElementById('lFloor2').value;
   if(!f){box.innerHTML='<span class="pill-hint">Select Floor first</span>';return}
   const types=[...new Set(LOCS.filter(d=>d.floor===f).map(d=>d.type))].filter(t=>t&&t!=='FLO Feed').sort();
-  box.innerHTML=types.map(t=>`<button type="button" class="pill-btn pill-shelve${t===lShelve?' active':''}" onclick="lSelShelve('${esc(t)}')" data-v="${esc(t)}">${t}</button>`).join('')||'<span class="pill-hint">No types</span>';
+  box.innerHTML=types.map(t=>`<button type="button" class="pill-btn pill-shelve${t===lShelve?' active':''}" onclick="lSelShelve('${esc(t)}')">${t}</button>`).join('')||'<span class="pill-hint">No types</span>';
 }
 function lSelShelve(t){lShelve=t;renderLShelve();lShow2()}
 function renderLSpace2(){renderOptionPills('lSpace2Box',LBH_SPACES,lSpace2,'pill-remark','lSelSpace2')}
@@ -948,7 +985,6 @@ function lShow2(){
   document.getElementById('listLbh2').innerHTML=filtered.map(i=>lbhCard(i,'listLbh2')).join('')||'<div style="color:#c0392b;text-align:center;padding:20px">No results</div>';
 }
 
-// ── CARDS ──
 function qtyTagClass(r){if(r.includes('Free'))return'st-free';if(r.includes('Partial'))return'st-partial';if(r.includes('Semi'))return'st-semi';return'st-full'}
 function qtyRangeLabel(r){if(r.includes('Free'))return'0 Qty';if(r.includes('Partial'))return'1-10';if(r.includes('Semi'))return'11-30';if(r.includes('Full'))return'31+';return''}
 
@@ -957,10 +993,11 @@ function qtyCard(i,cid,showProduct){
   let prod='';
   if(showProduct&&i.totalQty>0&&i.rawProd){
     const cleanProd=String(i.rawProd).replace(/\{[^}]*\}/g,' ').replace(/\s+/g,' ').trim();
+    const eanDisplay=(i.eans&&i.eans.length>1)?i.eans.join(', '):(i.ean||'N/A');
     prod=`<div class="product-details"><div class="pd-grid">
       <div class="pd-product"><strong>Product:</strong> ${cleanProd||'N/A'}</div>
       <div class="pd-meta">
-        <div><strong>EAN:</strong> <span class="ean-highlight">${(i.eans&&i.eans.length>1)?i.eans.join(', '):i.ean||'N/A'}</span></div>
+        <div><strong>EAN:</strong> <span class="ean-highlight">${eanDisplay}</span></div>
         <div><strong>FSN:</strong> ${i.fsn||'N/A'}</div>
         <div><strong>WID:</strong> ${i.wid||'N/A'} — <span class="qty-highlight">Qty: ${i.itemQty||0}</span></div>
       </div></div></div>`;
@@ -985,7 +1022,7 @@ function qtyCard(i,cid,showProduct){
     </div></div>`;
   }
   return `<div class="card"><span class="status-tag ${tc}">${i.remark}${range?' ('+range+')':''}</span>
-    <b>Location: ${i.label}</b>
+    <b>📍 ${i.label}</b> <small style="color:#888">${i.type||''}</small>
     <div style="font-size:12px;margin-bottom:4px">Total Qty: ${i.totalQty}</div>
     ${prod}${btns}</div>`;
 }
@@ -1016,8 +1053,8 @@ function lbhCard(i,cid){
     </div></div>`;
   }
   return `<div class="card card-lbh"><span class="status-tag ${lbhTagCls(r)}">${lbhLabel(r)}</span>
-    <b>Location: ${i.label}</b>
-    <div style="font-size:11px;color:#666;margin-bottom:2px">Type: ${i.type||'—'} | Qty: ${i.totalQty}</div>
+    <b>📍 ${i.label}</b> <small style="color:#888">${i.type||''}</small>
+    <div style="font-size:11px;color:#666;margin-bottom:2px">Qty: ${i.totalQty}</div>
     <div class="lbh-bar-bg"><div class="lbh-bar-fill" style="width:${barW}%;background:${barColor}"></div></div>
     <div class="lbh-stats"><span style="color:${barColor}">Used: ${util!=null?util.toFixed(1)+'%':'N/A'}</span><span style="color:#27ae60">Avail: ${avail!=null?avail.toFixed(1)+'%':'N/A'}</span></div>
     <div class="product-details" style="margin-top:4px"><strong>Shelf Cufeet:</strong> ${i.cufeet||'N/A'} | <strong>Used Cuft:</strong> ${i.totalQtyCuft||'N/A'}</div>
@@ -1029,27 +1066,21 @@ function toggleGtl(btn){
   if(sub&&sub.classList.contains('gtl-sub')){const s=sub.style.display==='block';sub.style.display=s?'none':'block';btn.textContent=s?'GTL ▼':'GTL ▲'}
 }
 
-// ── ACTION ──
 async function doAction(btn,shelf,action,cid){
   btn.textContent='...';btn.disabled=true;
   const isFree=['GTL Done','Free Location','Already Free','GTL','Item Pick'].includes(action);
   const isFull=['Already Full','Putaway Done','Item Put'].includes(action);
-  // optimistic update
   LOCS.forEach(l=>{if(l.label===shelf){if(isFree){l.remark='Free Shelve';l.totalQty=0;}else if(isFull)l.remark='Full Space';}});
   RAW.forEach(r=>{if(r.label===shelf){if(isFree){r.remark='Free Shelve';r.totalQty=0;}else if(isFull)r.remark='Full Space';}});
-  // re-render current list
   if(cid==='listScan')doScan();
   else if(cid==='listQty')qShow();
   else if(cid==='listQty2')qShow2();
   else if(cid==='listLbh')lShow();
   else if(cid==='listLbh2')lShow2();
-  try{
-    await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shelfId:shelf,action,user:USER})});
-  }catch(e){}
+  try{await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shelfId:shelf,action,user:USER})});}catch(e){}
   btn.textContent='Done';
 }
 
-// ── ACTION SUMMARY ──
 function actionPillClass(a){const m={'GTL Done':'ap-gtl','GTL':'ap-gtl','Item Pick':'ap-itempick','Item Put':'ap-itemput','Putaway Done':'ap-putaway','Free Location':'ap-free','Already Free':'ap-free','Already Full':'ap-fullx'};return m[a]||'ap-other'}
 function renderAction(targetId){
   const wrap=document.getElementById(targetId);if(!wrap||!ACTIONS)return;
@@ -1075,7 +1106,6 @@ function renderAction(targetId){
   wrap.innerHTML=html;
 }
 
-// ── BINS DASHBOARD ──
 function renderBins(targetId){
   const wrap=document.getElementById(targetId);if(!wrap)return;
   let rows='',gF=0,gP=0,gS=0,gFu=0;
@@ -1122,7 +1152,6 @@ function renderLbhBins(targetId){
     </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
-// ── INIT ──
 window.addEventListener('load',()=>{
   const sid=sessionStorage.getItem('did'),sname=sessionStorage.getItem('dname');
   if(sid){
@@ -1133,52 +1162,12 @@ window.addEventListener('load',()=>{
   } else {
     const inp=document.getElementById('casperId');if(inp)inp.focus();
   }
-    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-_lastLoad>30000)loadData()});
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-_lastLoad>30000)loadData()});
 });
-
-let _scanner=null,_scanning=false;
-async function toggleScanner(){
-  if(_scanning){stopScanner();return;}
-  const box=document.getElementById('scannerBox');
-  const video=document.getElementById('camVideo');
-  box.style.display='block';
-  try{
-    const stream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}
-    });
-    video.srcObject=stream;
-    await video.play();
-    _scanning=true;
-    scanFrame(video);
-  }catch(e){
-    box.style.display='none';
-    alert('Camera error: '+e.message);
-  }
-}
-function stopScanner(){
-  _scanning=false;
-  const video=document.getElementById('camVideo');
-  if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
-  document.getElementById('scannerBox').style.display='none';
-}
-function scanFrame(video){
-  if(!_scanning)return;
-  if(!window.BarcodeDetector){requestAnimationFrame(()=>scanFrame(video));return;}
-  const detector=new BarcodeDetector({formats:['ean_13','ean_8','code_128','qr_code','code_39']});
-  const detect=async()=>{
-    if(!_scanning)return;
-    try{
-      const codes=await detector.detect(video);
-      if(codes.length>0){
-        document.getElementById('scanInput').value=codes[0].rawValue;
-        doScan();stopScanner();return;
-      }
-    }catch(e){}
-    requestAnimationFrame(detect);
-  };
-  detect();
-}
-
 </script>
 </body>
 </html>"""
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
