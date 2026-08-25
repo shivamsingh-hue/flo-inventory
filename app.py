@@ -443,7 +443,7 @@ FRONTEND = r"""<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>DIC-LIVE GUIDED PUTAWAY V3.O</title>
+  <title>ANJANEYA-LIVE GUIDED PUTAWAY V3.O</title>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
     *{box-sizing:border-box}
@@ -581,7 +581,7 @@ FRONTEND = r"""<!DOCTYPE html>
       <div id="loginMsg" class="lo-msg"></div>
     </div>
     <div class="lo-footer">
-      <span class="lo-footer-badge">⚡ DIC-LIVE GUIDED PUTAWAY V3.O</span>
+      <span class="lo-footer-badge">⚡ ANJANEYA-LIVE GUIDED PUTAWAY V3.O</span>
       <span style="color:rgba(255,255,255,.65);font-size:9.5px;font-weight:700;">Developed by DIC - IMT TEAM</span>
     </div>
   </div>
@@ -593,7 +593,7 @@ FRONTEND = r"""<!DOCTYPE html>
     <div class="gold-stripe"></div>
     <div class="hdr-inner">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span class="hdr-h1">🚛 DIC-LIVE GUIDED PUTAWAY V3.O</span>
+        <span class="hdr-h1">🚛 ANJANEYA-LIVE GUIDED PUTAWAY V3.O</span>
         <span id="statTime" style="font-size:9px;color:rgba(255,255,255,.9);font-weight:800;background:rgba(255,255,255,.15);border-radius:5px;padding:2px 8px;margin-left:auto">—</span>
       </div>
       <div class="hdr-stats">
@@ -654,7 +654,7 @@ FRONTEND = r"""<!DOCTYPE html>
 
 <!-- SCAN PAGE -->
 <div id="scan-page" class="container" style="display:none">
-  <div class="maroon-hdr"><div class="gold-stripe"></div><div class="sec-hdr"><div class="sec-title">🔍 Item Scan</div><div class="sec-sub">DIC-LIVE GUIDED PUTAWAY V3.O</div></div></div>
+  <div class="maroon-hdr"><div class="gold-stripe"></div><div class="sec-hdr"><div class="sec-title">🔍 Item Scan</div><div class="sec-sub">ANJANEYA-LIVE GUIDED PUTAWAY V3.O</div></div></div>
   <div style="padding:8px 14px">
     <button class="back-btn" onclick="goHome()" style="color:#7B1818">‹ Back</button>
     <label style="color:#7B1818;font-weight:800">⚡ Scan Location / FSN / WID / EAN</label>
